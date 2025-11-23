@@ -1,16 +1,16 @@
 # SHREEYA-RAJ
 # FinGuard: Personal Finance Manager & Fraud Detection
 
-## 📖 Overview
+##  Overview
 FinGuard is a web application that helps users manage their finances while detecting suspicious transactions using machine learning. It combines expense tracking with real-time fraud protection.
 
-## ✨ Features
-- **💰 Financial Tracking**: Add income/expenses with categories
-- **📊 Dashboard**: View financial summary and analytics
-- **🛡️ Fraud Detection**: ML-powered suspicious transaction alerts
-- **👤 User Management**: Secure authentication and profiles
+##  Features
+- ** Financial Tracking**: Add income/expenses with categories
+- ** Dashboard**: View financial summary and analytics
+- ** Fraud Detection**: ML-powered suspicious transaction alerts
+- ** User Management**: Secure authentication and profiles
 
-## 🛠️ Technologies
+##  Technologies
 - **Frontend**: React.js, Chart.js, Axios
 - **Backend**: Node.js, Express.js, JWT
 - **Database**: PostgreSQL
@@ -59,7 +59,7 @@ npm start
 
 Access the app at: `http://localhost:3000`
 
-## 🧪 Testing
+##  Testing
 ```bash
 # Backend tests
 cd backend && npm test
