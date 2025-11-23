@@ -1,24 +1,34 @@
-# app.py - Main Flask Application
-from flask import Flask, request, jsonify
-from flask_cors import CORS
+# FinGuard - Personal Finance Manager with Fraud Detection
+# Complete Colab-Compatible Version
+
+!pip install flask-ngrok
+
 import numpy as np
+import pandas as pd
 import joblib
 from sklearn.ensemble import IsolationForest
+from flask import Flask, request, jsonify
+from flask_ngrok import run_with_ngrok
 import sqlite3
 from datetime import datetime
 import hashlib
 import jwt
-import os
+from collections import defaultdict
+import matplotlib.pyplot as plt
+import seaborn as sns
 
+# Initialize Flask App with ngrok for Colab
 app = Flask(__name__)
-CORS(app)
-app.config['SECRET_KEY'] = 'your-secret-key-here'
+run_with_ngrok(app)  # This makes the app accessible via public URL
+app.config['SECRET_KEY'] = 'finguard-secret-key-2024'
 
-# Initialize SQLite Database
+print("🚀 Initializing FinGuard - Personal Finance Manager with Fraud Detection...")
+
+# Initialize SQLite Database in Memory for Colab
 def init_db():
-    conn = sqlite3.connect('finguard.db')
+    conn = sqlite3.connect(':memory:')
     cursor = conn.cursor()
-    
+
     # Users table
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS users (
@@ -29,7 +39,7 @@ def init_db():
             created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ''')
-    
+
     # Transactions table
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS transactions (
@@ -47,57 +57,83 @@ def init_db():
             FOREIGN KEY (user_id) REFERENCES users (id)
         )
     ''')
-    
-    conn.commit()
-    conn.close()
 
-init_db()
+    # Insert sample user
+    cursor.execute('''
+        INSERT OR IGNORE INTO users (username, email, password)
+        VALUES (?, ?, ?)
+    ''', ('demo_user', 'demo@finguard.com', hashlib.sha256('demo123'.encode()).hexdigest()))
+
+    # Insert sample transactions
+    sample_transactions = [
+        (1, 5000.00, 'income', 'salary', 'Monthly Salary', '2024-01-01 09:00:00', 0, 0.1, 'Company HQ', 'bank_transfer'),
+        (1, 1500.00, 'expense', 'electronics', 'New Laptop', '2024-01-02 14:30:00', 1, -0.15, 'Online Store', 'credit_card'),
+        (1, 45.50, 'expense', 'food', 'Groceries', '2024-01-03 16:45:00', 0, 0.08, 'Supermarket', 'debit_card'),
+        (1, 200.00, 'expense', 'shopping', 'Clothes', '2024-01-04 11:20:00', 0, 0.05, 'Mall', 'debit_card'),
+        (1, 0.50, 'expense', 'other', 'Test Transaction', '2024-01-05 03:15:00', 1, -0.22, 'Unknown', 'credit_card'),
+        (1, 3000.00, 'income', 'bonus', 'Yearly Bonus', '2024-01-06 10:00:00', 0, 0.12, 'Company HQ', 'bank_transfer'),
+    ]
+
+    cursor.executemany('''
+        INSERT INTO transactions
+        (user_id, amount, type, category, description, date, is_fraud, fraud_score, location, payment_method)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    ''', sample_transactions)
+
+    conn.commit()
+    return conn
+
+# Global database connection
+db_conn = init_db()
 
 # Fraud Detection Model
 class FraudDetector:
     def __init__(self):
         self.model = None
-        self.load_model()
-    
-    def load_model(self):
-        try:
-            self.model = joblib.load('fraud_model.pkl')
-        except:
-            # Train a simple model if none exists
-            np.random.seed(42)
-            normal_transactions = np.random.normal(100, 50, 1000)
-            fraud_transactions = np.concatenate([
-                np.random.uniform(500, 2000, 50),
-                np.random.uniform(0.1, 5, 50)
-            ])
-            X_train = np.concatenate([normal_transactions, fraud_transactions]).reshape(-1, 1)
-            
-            self.model = IsolationForest(contamination=0.1, random_state=42)
-            self.model.fit(X_train)
-            joblib.dump(self.model, 'fraud_model.pkl')
-    
-    def detect_fraud(self, amount, user_id=None):
+        self.train_model()
+
+    def train_model(self):
+        print("🤖 Training Fraud Detection Model...")
+
+        # Create synthetic training data
+        np.random.seed(42)
+
+        # Normal transactions (typical amounts)
+        normal_amounts = np.random.normal(100, 50, 800)
+
+        # Fraud transactions (very high or very low amounts)
+        fraud_high = np.random.uniform(500, 2000, 100)
+        fraud_low = np.random.uniform(0.1, 5, 100)
+        fraud_amounts = np.concatenate([fraud_high, fraud_low])
+
+        # Combine and train
+        X_train = np.concatenate([normal_amounts, fraud_amounts]).reshape(-1, 1)
+
+        self.model = IsolationForest(
+            contamination=0.2,  # Expect 20% fraud
+            random_state=42,
+            n_estimators=100
+        )
+        self.model.fit(X_train)
+        print("✅ Fraud detection model trained successfully!")
+
+    def detect_fraud(self, amount):
         amount_array = np.array([[amount]])
         prediction = self.model.predict(amount_array)
         fraud_score = self.model.decision_function(amount_array)[0]
-        
+
         return {
             'is_fraud': bool(prediction[0] == -1),
-            'fraud_score': float(fraud_score)
+            'fraud_score': float(fraud_score),
+            'risk_level': 'HIGH' if fraud_score < -0.1 else 'MEDIUM' if fraud_score < 0 else 'LOW'
         }
 
+# Initialize fraud detector
 fraud_detector = FraudDetector()
 
 # Authentication Helper Functions
 def hash_password(password):
     return hashlib.sha256(password.encode()).hexdigest()
-
-def verify_password(password, hashed):
-    return hash_password(password) == hashed
-
-def generate_token(user_id):
-    payload = {'user_id': user_id, 'exp': datetime.utcnow()}
-    return jwt.encode(payload, app.config['SECRET_KEY'], algorithm='HS256')
 
 def verify_token(token):
     try:
@@ -106,31 +142,40 @@ def verify_token(token):
     except:
         return None
 
-# Authentication Routes
+# API Routes
+@app.route('/')
+def home():
+    return '''
+    <h1>🏦 FinGuard - Personal Finance Manager</h1>
+    <p>Welcome to FinGuard API! Available endpoints:</p>
+    <ul>
+        <li><b>POST /api/register</b> - User registration</li>
+        <li><b>POST /api/login</b> - User login</li>
+        <li><b>POST /api/transactions</b> - Add transaction with fraud detection</li>
+        <li><b>GET /api/transactions</b> - Get user transactions</li>
+        <li><b>GET /api/dashboard</b> - Get financial dashboard</li>
+        <li><b>GET /api/fraud-alerts</b> - Get fraud alerts</li>
+        <li><b>GET /api/analytics</b> - Get financial analytics</li>
+    </ul>
+    '''
+
 @app.route('/api/register', methods=['POST'])
 def register():
     data = request.json
     username = data.get('username')
     email = data.get('email')
     password = data.get('password')
-    
-    if not all([username, email, password]):
-        return jsonify({'error': 'All fields are required'}), 400
-    
-    hashed_password = hash_password(password)
-    
-    conn = sqlite3.connect('finguard.db')
-    cursor = conn.cursor()
-    
+
+    cursor = db_conn.cursor()
     try:
         cursor.execute(
             'INSERT INTO users (username, email, password) VALUES (?, ?, ?)',
-            (username, email, hashed_password)
+            (username, email, hash_password(password))
         )
         user_id = cursor.lastrowid
-        conn.commit()
-        
-        token = generate_token(user_id)
+        db_conn.commit()
+
+        token = jwt.encode({'user_id': user_id}, app.config['SECRET_KEY'], algorithm='HS256')
         return jsonify({
             'message': 'User registered successfully',
             'token': token,
@@ -138,69 +183,50 @@ def register():
         })
     except sqlite3.IntegrityError:
         return jsonify({'error': 'Username or email already exists'}), 400
-    finally:
-        conn.close()
 
 @app.route('/api/login', methods=['POST'])
 def login():
     data = request.json
     username = data.get('username')
     password = data.get('password')
-    
-    conn = sqlite3.connect('finguard.db')
-    cursor = conn.cursor()
-    
-    cursor.execute(
-        'SELECT id, password FROM users WHERE username = ?',
-        (username,)
-    )
+
+    cursor = db_conn.cursor()
+    cursor.execute('SELECT id, password FROM users WHERE username = ?', (username,))
     user = cursor.fetchone()
-    conn.close()
-    
-    if user and verify_password(password, user[1]):
-        token = generate_token(user[0])
+
+    if user and hash_password(password) == user[1]:
+        token = jwt.encode({'user_id': user[0]}, app.config['SECRET_KEY'], algorithm='HS256')
         return jsonify({
             'message': 'Login successful',
             'token': token,
             'user_id': user[0]
         })
-    
+
     return jsonify({'error': 'Invalid credentials'}), 401
 
-# Transaction Routes
 @app.route('/api/transactions', methods=['POST'])
 def add_transaction():
     token = request.headers.get('Authorization')
     user_id = verify_token(token)
-    
+
     if not user_id:
         return jsonify({'error': 'Invalid token'}), 401
-    
+
     data = request.json
-    amount = data.get('amount')
-    transaction_type = data.get('type')
-    category = data.get('category')
-    description = data.get('description')
-    location = data.get('location', '')
-    payment_method = data.get('payment_method', '')
-    
-    # Fraud detection
-    fraud_result = fraud_detector.detect_fraud(amount, user_id)
-    
-    conn = sqlite3.connect('finguard.db')
-    cursor = conn.cursor()
-    
+    fraud_result = fraud_detector.detect_fraud(data['amount'])
+
+    cursor = db_conn.cursor()
     cursor.execute('''
-        INSERT INTO transactions 
+        INSERT INTO transactions
         (user_id, amount, type, category, description, location, payment_method, is_fraud, fraud_score)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-    ''', (user_id, amount, transaction_type, category, description, location, payment_method, 
+    ''', (user_id, data['amount'], data['type'], data['category'], data['description'],
+          data.get('location', ''), data.get('payment_method', ''),
           fraud_result['is_fraud'], fraud_result['fraud_score']))
-    
+
     transaction_id = cursor.lastrowid
-    conn.commit()
-    conn.close()
-    
+    db_conn.commit()
+
     return jsonify({
         'message': 'Transaction added successfully',
         'transaction_id': transaction_id,
@@ -211,133 +237,191 @@ def add_transaction():
 def get_transactions():
     token = request.headers.get('Authorization')
     user_id = verify_token(token)
-    
+
     if not user_id:
         return jsonify({'error': 'Invalid token'}), 401
-    
-    conn = sqlite3.connect('finguard.db')
-    cursor = conn.cursor()
-    
-    cursor.execute('''
-        SELECT * FROM transactions 
-        WHERE user_id = ? 
-        ORDER BY date DESC
-    ''', (user_id,))
-    
-    transactions = cursor.fetchall()
-    conn.close()
-    
-    # Convert to list of dictionaries
-    transaction_list = []
-    for trans in transactions:
-        transaction_list.append({
-            'id': trans[0],
-            'user_id': trans[1],
-            'amount': trans[2],
-            'type': trans[3],
-            'category': trans[4],
-            'description': trans[5],
-            'date': trans[6],
-            'is_fraud': bool(trans[7]),
-            'fraud_score': trans[8],
-            'location': trans[9],
-            'payment_method': trans[10]
-        })
-    
-    return jsonify({'transactions': transaction_list})
+
+    cursor = db_conn.cursor()
+    cursor.execute('SELECT * FROM transactions WHERE user_id = ? ORDER BY date DESC', (user_id,))
+
+    columns = [desc[0] for desc in cursor.description]
+    transactions = [dict(zip(columns, row)) for row in cursor.fetchall()]
+
+    return jsonify({'transactions': transactions})
 
 @app.route('/api/dashboard', methods=['GET'])
 def get_dashboard():
     token = request.headers.get('Authorization')
     user_id = verify_token(token)
-    
+
     if not user_id:
         return jsonify({'error': 'Invalid token'}), 401
-    
-    conn = sqlite3.connect('finguard.db')
-    cursor = conn.cursor()
-    
-    # Get total income
+
+    cursor = db_conn.cursor()
+
+    # Financial totals
     cursor.execute('SELECT SUM(amount) FROM transactions WHERE user_id = ? AND type = "income"', (user_id,))
     total_income = cursor.fetchone()[0] or 0
-    
-    # Get total expenses
+
     cursor.execute('SELECT SUM(amount) FROM transactions WHERE user_id = ? AND type = "expense"', (user_id,))
     total_expenses = cursor.fetchone()[0] or 0
-    
-    # Get fraud alerts
+
+    # Fraud alerts
     cursor.execute('SELECT COUNT(*) FROM transactions WHERE user_id = ? AND is_fraud = 1', (user_id,))
     fraud_alerts = cursor.fetchone()[0]
-    
-    # Get recent transactions
+
+    # Recent transactions
     cursor.execute('SELECT * FROM transactions WHERE user_id = ? ORDER BY date DESC LIMIT 5', (user_id,))
-    recent_transactions = cursor.fetchall()
-    
-    conn.close()
-    
-    dashboard_data = {
+    recent_transactions = [dict(zip([desc[0] for desc in cursor.description], row)) for row in cursor.fetchall()]
+
+    return jsonify({
         'total_income': total_income,
         'total_expenses': total_expenses,
         'net_balance': total_income - total_expenses,
         'fraud_alerts': fraud_alerts,
-        'recent_transactions': [
-            {
-                'id': trans[0],
-                'amount': trans[2],
-                'type': trans[3],
-                'category': trans[4],
-                'description': trans[5],
-                'is_fraud': bool(trans[7])
-            } for trans in recent_transactions
-        ]
-    }
-    
-    return jsonify(dashboard_data)
+        'recent_transactions': recent_transactions
+    })
 
 @app.route('/api/fraud-alerts', methods=['GET'])
 def get_fraud_alerts():
     token = request.headers.get('Authorization')
     user_id = verify_token(token)
-    
+
     if not user_id:
         return jsonify({'error': 'Invalid token'}), 401
-    
-    conn = sqlite3.connect('finguard.db')
-    cursor = conn.cursor()
-    
-    cursor.execute('''
-        SELECT * FROM transactions 
-        WHERE user_id = ? AND is_fraud = 1 
-        ORDER BY date DESC
-    ''', (user_id,))
-    
-    fraud_transactions = cursor.fetchall()
-    conn.close()
-    
-    alerts = []
-    for trans in fraud_transactions:
-        alerts.append({
-            'id': trans[0],
-            'amount': trans[2],
-            'type': trans[3],
-            'category': trans[4],
-            'description': trans[5],
-            'date': trans[6],
-            'fraud_score': trans[8],
-            'location': trans[9],
-            'payment_method': trans[10]
-        })
-    
-    return jsonify({'fraud_alerts': alerts})
 
+    cursor = db_conn.cursor()
+    cursor.execute('SELECT * FROM transactions WHERE user_id = ? AND is_fraud = 1 ORDER BY date DESC', (user_id,))
+
+    alerts = [dict(zip([desc[0] for desc in cursor.description], row)) for row in cursor.fetchall()]
+    return jsonify({'fraud_alerts': alerts, 'count': len(alerts)})
+
+@app.route('/api/analytics', methods=['GET'])
+def get_analytics():
+    token = request.headers.get('Authorization')
+    user_id = verify_token(token)
+
+    if not user_id:
+        return jsonify({'error': 'Invalid token'}), 401
+
+    cursor = db_conn.cursor()
+
+    # Expense by category
+    cursor.execute('''
+        SELECT category, SUM(amount) as total
+        FROM transactions
+        WHERE user_id = ? AND type = 'expense'
+        GROUP BY category
+    ''', (user_id,))
+    expenses_by_category = {row[0]: row[1] for row in cursor.fetchall()}
+
+    # Monthly trend
+    cursor.execute('''
+        SELECT strftime('%Y-%m', date) as month, type, SUM(amount) as total
+        FROM transactions
+        WHERE user_id = ?
+        GROUP BY month, type
+        ORDER BY month
+    ''', (user_id,))
+    monthly_trend = cursor.fetchall()
+
+    return jsonify({
+        'expenses_by_category': expenses_by_category,
+        'monthly_trend': monthly_trend
+    })
+
+# Demo and Visualization Functions
+def run_demo():
+    print("\n" + "="*60)
+    print("🎯 FINGUARD DEMONSTRATION")
+    print("="*60)
+
+    # Test fraud detection
+    test_amounts = [50, 1500, 3, 200, 800]
+    print("\n🔍 Testing Fraud Detection:")
+    for amount in test_amounts:
+        result = fraud_detector.detect_fraud(amount)
+        status = "🚨 FRAUD" if result['is_fraud'] else "✅ LEGIT"
+        print(f"  Amount: ${amount:6.2f} → {status} (Score: {result['fraud_score']:.3f})")
+
+    # Show sample data
+    cursor = db_conn.cursor()
+    cursor.execute('''
+        SELECT type, category, amount, is_fraud, description
+        FROM transactions
+        ORDER BY date DESC LIMIT 10
+    ''')
+
+    print(f"\n📊 Sample Transactions:")
+    for trans in cursor.fetchall():
+        fraud_indicator = "🚨" if trans[3] else "✅"
+        print(f"  {fraud_indicator} {trans[0]:7} {trans[1]:12} ${trans[2]:8.2f} - {trans[4]}")
+
+    # Financial summary
+    cursor.execute('SELECT SUM(amount) FROM transactions WHERE type="income"')
+    total_income = cursor.fetchone()[0]
+    cursor.execute('SELECT SUM(amount) FROM transactions WHERE type="expense"')
+    total_expense = cursor.fetchone()[0]
+    cursor.execute('SELECT COUNT(*) FROM transactions WHERE is_fraud=1')
+    fraud_count = cursor.fetchone()[0]
+
+    print(f"\n💳 Financial Summary:")
+    print(f"  Total Income:  ${total_income:,.2f}")
+    print(f"  Total Expenses: ${total_expense:,.2f}")
+    print(f"  Net Balance:   ${total_income - total_expense:,.2f}")
+    print(f"  Fraud Alerts:   {fraud_count} transactions")
+
+    # Create visualization
+    plt.figure(figsize=(15, 5))
+
+    # Plot 1: Expense distribution
+    plt.subplot(1, 3, 1)
+    cursor.execute('SELECT category, SUM(amount) FROM transactions WHERE type="expense" GROUP BY category')
+    expense_data = cursor.fetchall()
+    categories = [row[0] for row in expense_data]
+    amounts = [row[1] for row in expense_data]
+
+    plt.pie(amounts, labels=categories, autopct='%1.1f%%', startangle=90)
+    plt.title('Expense Distribution by Category')
+
+    # Plot 2: Fraud detection scatter
+    plt.subplot(1, 3, 2)
+    cursor.execute('SELECT amount, fraud_score, is_fraud FROM transactions')
+    fraud_data = cursor.fetchall()
+
+    amounts = [row[0] for row in fraud_data]
+    scores = [row[1] for row in fraud_data]
+    colors = ['red' if row[2] else 'green' for row in fraud_data]
+
+    plt.scatter(amounts, scores, c=colors, alpha=0.6)
+    plt.axhline(y=0, color='black', linestyle='--', alpha=0.3)
+    plt.xlabel('Transaction Amount ($)')
+    plt.ylabel('Fraud Score')
+    plt.title('Fraud Detection Analysis')
+    plt.legend(['Threshold', 'Fraud', 'Legitimate'])
+
+    # Plot 3: Income vs Expenses
+    plt.subplot(1, 3, 3)
+    cursor.execute('SELECT type, SUM(amount) FROM transactions GROUP BY type')
+    summary_data = cursor.fetchall()
+
+    types = [row[0] for row in summary_data]
+    totals = [row[1] for row in summary_data]
+    colors = ['green' if t == 'income' else 'red' for t in types]
+
+    plt.bar(types, totals, color=colors, alpha=0.7)
+    plt.title('Income vs Expenses')
+    plt.ylabel('Amount ($)')
+
+    plt.tight_layout()
+    plt.show()
+
+# Start the application
 if __name__ == '__main__':
-    print("Starting FinGuard Server...")
-    print("API endpoints:")
-    print("  POST /api/register - User registration")
-    print("  POST /api/login - User login")
-    print("  POST /api/transactions - Add transaction")
-    print("  GET /api/transactions - Get user transactions")
-    print("  GET /api/dashboard - Get dashboard data")
-    print("  GET /api/fraud-alerts - Get fraud alerts")
-    print("\nServer running on http://localhost:5000")
-    app.run(debug=True, port=5000)
+    print("\n✅ FinGuard Backend Server Ready!")
+    print("📊 Running demonstration...")
+    run_demo()
+    print(f"\n🌐 Starting Flask server with ngrok...")
+    print("   Your API will be available at the ngrok URL shown above!")
+    print("   Use the demo credentials: username='demo_user', password='demo123'")
+    app.run()
